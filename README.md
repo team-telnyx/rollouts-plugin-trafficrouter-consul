@@ -255,5 +255,105 @@ Finally, perform the Rollout operation using the Argo Rollouts Kubectl plugin.
 kubectl argo rollouts promote test-service
 ```
 
+## Header-based routing
+
+A `setHeaderRoute` step pins a chosen audience to the canary while everyone else continues to be
+split by weight. The plugin writes a Consul `ServiceRouter` named after `serviceName`, with a
+route whose destination names `canarySubsetName`. Consul compiles a subset-named destination
+with `getResolverNode()` rather than `getSplitterOrResolverNode()`, so that route bypasses the
+`ServiceSplitter` and the matched audience reaches the canary at 100%, while Consul's implicit
+catch-all still routes everybody else through the splitter that `setWeight` manages.
+
+```yaml
+      steps:
+      - setHeaderRoute:
+          name: canary-audience
+          match:
+          - headerName: user-agent
+            headerValue:
+              regex: ".*Firefox.*"
+          - headerName: x-geo-region
+            headerValue:
+              exact: africa
+      - pause: {}
+      - setWeight: 20
+      trafficRouting:
+        managedRoutes:
+        - name: canary-audience
+```
+
+### Match entries are ANDed, not ORed
+
+**This plugin ANDs the `match` entries of a step; the built-in Istio reconciler ORs them.** The
+step above produces a single Consul route carrying both header matchers, so only a request that
+is *both* Firefox *and* from `africa` reaches the canary:
+
+```yaml
+spec:
+  routes:
+    - match:
+        http:
+          header:
+            - {name: user-agent, regex: ".*Firefox.*"}
+            - {name: x-geo-region, exact: africa}
+      destination: {service: test-service, serviceSubset: canary}
+```
+
+Istio would emit one match per entry and route a request matching *either* header. The
+difference is Consul's data model rather than a choice: all header matchers within a route must
+match for the route to apply. Anyone reading the Argo Rollouts documentation should expect OR
+and will get AND here.
+
+OR is still reachable two ways: regex alternation within a single header
+(`regex: ".*(Firefox|Safari).*"`), or several `setHeaderRoute` steps, each of which becomes its
+own route.
+
+Only `exact`, `prefix` and `regex` are reachable, because Argo Rollouts' `headerValue` offers
+nothing else. Consul additionally supports `suffix`, `present` and `invert`, but no rollout step
+can express them. Exactly one of the three must be set per entry: consul-k8s rejects a header
+match with more than one of `exact`/`prefix`/`suffix`/`regex`/`present`.
+
+### Preconditions the plugin cannot create
+
+A header route only compiles if the service's discovery chain speaks HTTP, and if the canary
+subset already exists on the `ServiceResolver`. The plugin creates neither, and surfaces the
+admission error with a reminder when Consul rejects the write. Set the protocol on a
+`ServiceDefaults` (or `ProxyDefaults`) before using `setHeaderRoute`:
+
+```yaml
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: ServiceDefaults
+metadata:
+  name: test-service
+spec:
+  protocol: http
+```
+
+### How named routes are tracked
+
+Argo Rollouts addresses header routes by name, but a Consul `ServiceRoute` has only `match` and
+`destination` — there is no name field, and no inert field that could carry one. The plugin
+therefore records names on the `ServiceRouter` itself:
+
+| Annotation | Meaning |
+| --- | --- |
+| `consul.rollouts.argoproj.io/managed-routes` | JSON array of route names, positionally parallel to a **prefix** of `spec.routes` |
+| `consul.rollouts.argoproj.io/managed-by` | the `namespace/name` of the Rollout that owns those routes |
+| `consul.rollouts.argoproj.io/created-by-plugin` | set when the plugin created the `ServiceRouter`, and may therefore delete it again |
+
+Managed routes always occupy the **front** of `spec.routes`, because Consul is first-match-wins
+and the targeted audience has to outrank any route you wrote yourself. Your own routes are
+preserved, kept in order, and never modified.
+
+The annotation is validated on every read rather than trusted: the name list may not be longer
+than `spec.routes`, names must be unique, and every route in the managed prefix must actually
+target the canary subset. If any of that fails the plugin reports an error instead of indexing
+blindly into `spec.routes` and stripping a route that may be yours. Likewise, a `ServiceRouter`
+whose `managed-by` names a different Rollout is refused: two Rollouts cannot drive one Consul
+service.
+
+On full promotion or abort the plugin removes the routes it owns and drops these annotations; it
+deletes the `ServiceRouter` only if it created it and no routes remain.
+
 # Testing
 To run unit tests use `go test ./...`. For end-to-end verification follow the steps in `./testing/README.md`.
