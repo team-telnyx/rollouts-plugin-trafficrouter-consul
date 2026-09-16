@@ -17,6 +17,20 @@ rules:
     resources:
       - servicesplitters
       - serviceresolvers
+  # setHeaderRoute steps write ServiceRouters. `delete` is required because the plugin removes
+  # a ServiceRouter it created once the rollout is fully promoted and no routes are left on it.
+  # It is granted only on servicerouters; the plugin never deletes a splitter or a resolver.
+  - verbs:
+      - create
+      - watch
+      - get
+      - update
+      - patch
+      - delete
+    apiGroups:
+      - consul.hashicorp.com
+    resources:
+      - servicerouters
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
