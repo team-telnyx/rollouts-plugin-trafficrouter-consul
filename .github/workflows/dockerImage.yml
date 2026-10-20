@@ -1,0 +1,24 @@
+name: Docker Image Workflow
+
+# Builds the plugin image with the shared Telnyx docker-image workflow.
+# `make build` (Makefile) produces a linux/amd64,linux/arm64 image with
+# provenance and SBOM attestations; the workflow scans it and, on main, pushes
+# it to registry.internal.telnyx.com/infra/rollouts-plugin-trafficrouter-consul
+# tagged <VERSION>.b<run number>.<short sha>. Pull requests build and test but
+# do not push.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  docker-image:
+    uses: team-telnyx/infra-ci-gha-workflows/.github/workflows/dockerImage.yml@latest
+    with:
+      runner: telnyx-large
+    secrets: inherit

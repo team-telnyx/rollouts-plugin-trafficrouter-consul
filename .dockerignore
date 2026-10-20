@@ -1,0 +1,6 @@
+# Keep .git: `go build` stamps vcs.revision/vcs.modified from it and buildx
+# records it in the provenance attestation.
+.github/
+testing/
+yaml/
+*.md

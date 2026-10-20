@@ -1,119 +1,78 @@
-# Copyright (c) HashiCorp, Inc.
-# SPDX-License-Identifier: Apache-2.0
+# syntax=docker/dockerfile:1
 
-# This Dockerfile contains multiple targets.
-# Use 'docker build --target=<name> .' to build one.
+# Build of the Consul traffic-router plugin for Argo Rollouts, as published by
+# the Telnyx docker-image workflow (see .github/workflows/dockerImage.yml).
 #
-# Every target has a BIN_NAME argument that must be provided via --build-arg=BIN_NAME=<name>
-# when building.
-
-
-# ===================================
+# The plugin is a static Go binary. The build stage always runs on the build
+# platform and cross-compiles with GOOS/GOARCH, and the release stage contains
+# no RUN instructions, so a linux/amd64,linux/arm64 image builds without QEMU.
 #
-#   Non-release images.
-#
-# ===================================
+# Images are pulled through the internal registry proxy rather than Docker Hub.
 
-# go-discover builds the discover binary (which we don't currently publish
-# either).
-FROM golang:1.19.2-alpine as go-discover
-RUN CGO_ENABLED=0 go install github.com/hashicorp/go-discover/cmd/discover@49f60c093101c9c5f6b04d5b1c80164251a761a6
+ARG GOLANG_IMAGE=registry.internal.telnyx.com/docker/library/golang:1.25-alpine
+ARG BASE_IMAGE=registry.internal.telnyx.com/docker/library/alpine:3.22
 
-# dev copies the binary from a local build
-# -----------------------------------
-# BIN_NAME is a requirement in the hashicorp docker github action
-FROM alpine:3.17 AS dev
+# ---------------------------------------------------------------------------
+# build: compile the plugin for TARGETOS/TARGETARCH
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM ${GOLANG_IMAGE} AS build
 
-# NAME and VERSION are the name of the software in releases.hashicorp.com
-# and the version to download. Example: NAME=consul VERSION=1.2.3.
-ARG BIN_NAME=rollouts-plugin-trafficrouter-consul
-ARG VERSION
-ARG TARGETARCH
-ARG TARGETOS
-ENV PRODUCT_NAME=$BIN_NAME
+# git is needed so `go build` can stamp vcs.revision / vcs.modified into the
+# binary's build info; that is what reviewers inspect to tie a binary to a
+# commit, independently of the image provenance attestation.
+RUN apk add --no-cache git
 
-LABEL name=${BIN_NAME} \
-      maintainer="Team Consul Kubernetes <team-consul-kubernetes@hashicorp.com>" \
-      vendor="HashiCorp" \
-      version=${VERSION} \
-      release=${VERSION} \
-      licenses="Apache-2.0" \
-      summary="rollouts-plugin-trafficrouter-consul is a plugin for Argo Rollouts." \
-      description="rollouts-plugin-trafficrouter-consul is a plugin for Argo Rollouts."
+WORKDIR /src
 
-# Set ARGs as ENV so that they can be used in ENTRYPOINT/CMD
-ENV BIN_NAME=${BIN_NAME}
-ENV VERSION=${VERSION}
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-RUN apk add --no-cache ca-certificates libcap openssl su-exec iputils libc6-compat iptables
+COPY . .
 
-# Create a non-root user to run the software.
-RUN addgroup ${BIN_NAME} && \
-    adduser -S -G ${BIN_NAME} 100
-
-COPY LICENSE /usr/share/doc/$PRODUCT_NAME/LICENSE.txt
-COPY --from=go-discover /go/bin/discover /bin/
-COPY pkg/bin/linux_${TARGETARCH}/${BIN_NAME} /bin
-
-USER 100
-CMD /bin/${BIN_NAME}
-
-
-# ===================================
-#
-#   Release images.
-#
-# ===================================
-
-
-# default release image
-# -----------------------------------
-# This Dockerfile creates a production release image for the project. This
-# downloads the release from releases.hashicorp.com and therefore requires that
-# the release is published before building the Docker image.
-#
-# We don't rebuild the software because we want the exact checksums and
-# binary signatures to match the software and our builds aren't fully
-# reproducible currently.
-FROM alpine:3.17 AS release-default
-
-ARG BIN_NAME=rollouts-plugin-trafficrouter-consul
-ARG PRODUCT_VERSION
-ENV PRODUCT_NAME=$BIN_NAME
-
-LABEL name=${BIN_NAME} \
-      maintainer="Team Consul Kubernetes <team-consul-kubernetes@hashicorp.com>" \
-      vendor="HashiCorp" \
-      version=${PRODUCT_VERSION} \
-      release=${PRODUCT_VERSION} \
-      licenses="Apache-2.0" \
-      summary="rollouts-plugin-trafficrouter-consul is a plugin for Argo Rollouts" \
-      description="rollouts-plugin-trafficrouter-consul is a plugin for Argo Rollouts."
-
-# Set ARGs as ENV so that they can be used in ENTRYPOINT/CMD
-ENV BIN_NAME=${BIN_NAME}
-ENV VERSION=${PRODUCT_VERSION}
-
-RUN apk add --no-cache ca-certificates libcap openssl su-exec iputils libc6-compat iptables
-
-# TARGETOS and TARGETARCH are set automatically when --platform is provided.
 ARG TARGETOS
 ARG TARGETARCH
+# VERSION is the release version (contents of ./VERSION); GIT_COMMIT the full
+# commit sha. Both are set by the Makefile.
+ARG VERSION=dev
+ARG GIT_COMMIT=unknown
 
-# Create a non-root user to run the software.
-RUN addgroup ${BIN_NAME} && \
-    adduser -S -G ${BIN_NAME} 100
+ENV CGO_ENABLED=0
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+      -ldflags "-s -w \
+        -X github.com/argoproj-labs/rollouts-plugin-trafficrouter-consul/pkg/version.Version=${VERSION} \
+        -X github.com/argoproj-labs/rollouts-plugin-trafficrouter-consul/pkg/version.VersionPrerelease= \
+        -X github.com/argoproj-labs/rollouts-plugin-trafficrouter-consul/pkg/version.GitCommit=${GIT_COMMIT}" \
+      -o /out/rollouts-plugin-trafficrouter-consul .
 
-COPY LICENSE /usr/share/doc/$PRODUCT_NAME/LICENSE.txt
-COPY --from=go-discover /go/bin/discover /bin/
-COPY dist/${TARGETOS}/${TARGETARCH}/${BIN_NAME} /bin/
+# ---------------------------------------------------------------------------
+# test: unit tests and vet, run natively on the build platform
+# (`make test`, and the "Test Image" stage of the docker-image workflow)
+# ---------------------------------------------------------------------------
+FROM build AS test
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go vet ./... && go test ./...
 
-USER 100
-CMD /bin/${BIN_NAME}
+# ---------------------------------------------------------------------------
+# release: the published image
+# ---------------------------------------------------------------------------
+FROM ${BASE_IMAGE} AS release
 
-# ===================================
-#
-#   Set default target to 'dev'.
-#
-# ===================================
-FROM dev
+ARG VERSION=dev
+
+LABEL org.opencontainers.image.title="rollouts-plugin-trafficrouter-consul" \
+      org.opencontainers.image.description="Argo Rollouts traffic-router plugin for Consul service mesh (Telnyx build)" \
+      org.opencontainers.image.vendor="Telnyx" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}"
+
+COPY LICENSE /usr/share/doc/rollouts-plugin-trafficrouter-consul/LICENSE.txt
+COPY --from=build /out/rollouts-plugin-trafficrouter-consul /bin/rollouts-plugin-trafficrouter-consul
+
+# The argo-rollouts controller runs this image as an init container that copies
+# /bin/rollouts-plugin-trafficrouter-consul into a shared emptyDir, so the
+# image keeps alpine's /bin/sh and cp. Same non-root uid as the upstream image.
+USER 100:100
+CMD ["/bin/rollouts-plugin-trafficrouter-consul"]
