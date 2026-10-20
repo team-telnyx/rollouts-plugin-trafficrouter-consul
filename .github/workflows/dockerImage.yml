@@ -21,4 +21,9 @@ jobs:
     uses: team-telnyx/infra-ci-gha-workflows/.github/workflows/dockerImage.yml@latest
     with:
       runner: telnyx-large
-    secrets: inherit
+    # Only what the build needs. No promotion (meta-dev.yml: mode never), so no
+    # PROMOTE_REGISTRY_* or ARGOCD_AUTH_TOKEN; no build.secrets.vault, so no
+    # VAULT_HA_*. The Docker image GitHub App's id comes from the org variable.
+    secrets:
+      APP_DOCKER_IMAGE_KEY: ${{ secrets.APP_DOCKER_IMAGE_KEY }}
+      GIT_ACCESS_SSH_PRIVATE_KEY: ${{ secrets.GIT_ACCESS_SSH_PRIVATE_KEY }}
