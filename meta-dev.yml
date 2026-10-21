@@ -1,0 +1,22 @@
+names:
+  service: rollouts-plugin-trafficrouter-consul
+
+project:
+  squad: infra.core.squad
+  primary_maintainer: jamesd
+  public_api: false
+  private_api: false
+
+build:
+  # Published as registry.internal.telnyx.com/infra/rollouts-plugin-trafficrouter-consul,
+  # next to the other Infra Core images that infra-svc-k8s-addons pins.
+  namespace: infra
+  # Tags are <VERSION>.b<run number>.<short sha>, e.g. 0.0.3.b12.91cc5c7.
+  use_version_file: true
+  version_file_path: "./VERSION"
+  # Pushes happen on main only (the default branch pattern). infra-svc-k8s-addons
+  # pins the infra/ image by digest, so there is no dev/ or prod/ promotion.
+  promote_to_dev:
+    mode: "never"
+  promote_to_prod:
+    mode: "never"

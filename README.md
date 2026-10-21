@@ -355,5 +355,47 @@ service.
 On full promotion or abort the plugin removes the routes it owns and drops these annotations; it
 deletes the `ServiceRouter` only if it created it and no routes remain.
 
+## Building and publishing (Telnyx fork)
+
+This fork is built only by CI. Nothing should be built on a laptop and pushed.
+
+- **Workflow**: `.github/workflows/dockerImage.yml` calls the shared Telnyx
+  [docker-image workflow](https://github.com/team-telnyx/infra-ci-gha-workflows/blob/main/docs/docker-image.md),
+  which runs `make build` and `make test` from the `Makefile`, scans the image,
+  and on `main` pushes it. Pull requests build and test without pushing.
+- **Image**: `registry.internal.telnyx.com/infra/rollouts-plugin-trafficrouter-consul`,
+  a `linux/amd64,linux/arm64` index with buildx **provenance** (`mode=max`) and
+  **SBOM** attestations. Tags are `<VERSION>.b<run number>.<short sha>` (from
+  `./VERSION`) plus the bare run number; `:red` is the latest build of `main`.
+- **Traceability**: `digest -> workflow run -> commit`. The run number is in
+  the tag, the commit in the `org.opencontainers.image.revision` label, in the
+  provenance attestation, and in the binary's Go build info (`vcs.revision`).
+
+```sh
+# platforms and attestation manifests behind a tag
+docker buildx imagetools inspect registry.internal.telnyx.com/infra/rollouts-plugin-trafficrouter-consul:<tag>
+
+# provenance (source repo + commit, builder, Dockerfile) and SBOM
+docker buildx imagetools inspect registry.internal.telnyx.com/infra/rollouts-plugin-trafficrouter-consul:<tag> \
+  --format '{{json .Provenance}}'
+docker buildx imagetools inspect registry.internal.telnyx.com/infra/rollouts-plugin-trafficrouter-consul:<tag> \
+  --format '{{json .SBOM}}'
+
+# commit stamped into the binary itself
+docker run --rm registry.internal.telnyx.com/infra/rollouts-plugin-trafficrouter-consul:<tag> \
+  /bin/rollouts-plugin-trafficrouter-consul -version
+```
+
+Deployments pin the **index digest** of a tag, not the tag:
+`infra-svc-k8s-addons` `apps/argo-rollouts/base/values.yaml` copies
+`/bin/rollouts-plugin-trafficrouter-consul` out of this image in an init
+container. To ship a new build, bump `VERSION` if the change warrants it, merge
+to `main`, take the index digest from the workflow run, and re-pin it there.
+
+Local builds: `make build` needs Docker's containerd image store to `--load` a
+multi-platform image; use `make build platforms=linux/$(go env GOARCH)` otherwise.
+`make test` runs the unit tests in the build container; `make lint` and
+`make fmt` run on the host.
+
 # Testing
 To run unit tests use `go test ./...`. For end-to-end verification follow the steps in `./testing/README.md`.
